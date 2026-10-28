@@ -17,5 +17,10 @@ server_scripts {
 }
 
 client_scripts {
+    'client/native.lua',
     'client/main.lua'
+}
+
+files {
+    'client/native.lua'
 }
