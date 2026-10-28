@@ -1,14 +1,28 @@
 # Feather Doors
 
 Authoritative RedM door domain for the Feather Framework. Version `0.1.0-dev`
-is an inert scaffold, not a working door-lock resource.
+contains the schema foundation and native proof adapter. It is not yet a working
+door-lock service.
 
 ## Current behavior
 
-Loads shared metadata and server diagnostics. It does not register or modify
-doors, accept network requests, persist data, run background loops or display
-player interactions. No runtime dependencies are required by this scaffold.
-Future dependencies will be declared after their actual contracts are verified.
+Requires `feather-mysql` and Core Contract 1. Startup waits up to 30 seconds for
+each provider, then creates the resource-owned migration journal and empty
+group/leaf tables. No door records, player mutations, network routes, background
+polling, prompts or state replication are enabled. Existing resource data is not
+imported. Version remains `0.1.0-dev` during this foundation stage.
+
+`feather_door_groups` stores stable UUID/key, manager, status, desired lock state,
+revision, delegation epoch and startup-policy fields. `feather_door_leaves`
+reserves a unique native door hash with model/position and one of two group
+ordinals. Startup policy is stored only; no policy is applied to native doors.
+Unsigned model hashes must eventually be normalized to uint32 at the API boundary.
+
+`feather_door_schema_migrations` journals checksum and applying/applied state.
+DDL auto-commits; interrupted same-checksum application can resume. Unknown or
+changed migrations, unjournaled domain tables and missing/wrong column types
+fail startup. Do not edit accepted migrations or manually mark failed rows applied.
+There is no destructive rollback or automatic schema repair.
 
 The internal `client/native.lua` adapter is now available for Phase 0 proof. It
 performs no work when loaded and is not exported to consumers. Only the separate
@@ -37,10 +51,20 @@ local health = exports['feather-doors']:GetHealth()
 ```
 
 Both return fresh tables. Capabilities identifies the resource/version/stage
-and reports all operational features as `false`. Health returns `ready = false`,
-`status = 'not_implemented'` and `stage = 'scaffold'`. A started scaffold does
-not establish domain readiness. These diagnostic shapes are provisional until
-the first operational contract is defined. No mutation exports are provided.
+and reports all operational features as `false`. `schema` becomes 1 only when
+the foundation is ready. Health keeps `ready=false` and exposes
+`stage='schema_foundation'`, `foundationReady`, `schemaVersion`,
+`migrationsApplied`, `migrationsResumed`, and `status='foundation_ready'` on
+successful schema startup. A required resource stop latches foundation readiness
+off until Doors is restarted. These diagnostic shapes remain provisional.
+No mutation exports or operational AwaitReady are provided.
+
+Server-console command `DoorsSchemaSmokeTest` is read-only: it verifies migration
+checksums/completion, three InnoDB tables and 22 expected column names/types.
+It does not test SQL constraints, transactional CRUD, receipt recovery or native
+behavior. Run it again after restarting Doors; first install should log
+applied=1/resumed=0 and an ordinary second startup applied=0/resumed=0.
+Refresh is required before restarting when installing this manifest change.
 
 ## Resource ownership
 
@@ -52,7 +76,9 @@ and staff adapters retain their respective domain responsibilities.
 
 Architecture, implementation plans and acceptance evidence live in
 `feather-framework-docs/feather-doors/FEATHER_DOORS_MASTER_PLAN.md` in the sibling
-documentation repository. This resource has not been deployed or accepted live.
+documentation repository. Native bank cleanup and physical lock/unlock have
+operator acceptance; schema startup/SQL and full domain behavior remain separate
+acceptance gates. Follow the current checkpoint rather than historical tests.
 
 ## License
 

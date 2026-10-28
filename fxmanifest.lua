@@ -4,7 +4,7 @@ rdr3_warning 'I acknowledge that this is a prerelease build of RedM, and I am aw
 lua54 'yes'
 
 name 'feather-doors'
-description 'Authoritative door domain for the Feather Framework (scaffold)'
+description 'Authoritative door domain for the Feather Framework (schema foundation)'
 author 'Feather Framework'
 version '0.1.0-dev'
 
@@ -13,7 +13,14 @@ shared_scripts {
 }
 
 server_scripts {
+    '@feather-mysql/lib/DB.lua',
+    'server/schema.lua',
     'server/main.lua'
+}
+
+dependencies {
+    'feather-mysql',
+    'feather-core'
 }
 
 client_scripts {
