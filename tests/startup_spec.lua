@@ -4,12 +4,16 @@ local function boot(options)
     options=options or {}
     local state={exports={},commands={},handlers={},messages={},dependency='started',dbCalls=0}
     FeatherDoors={Name='feather-doors',Version='0.1.0-dev'}
+    DoorsConfig={TrustedResources={}}
+    DoorsContract={Err=function(code) return {ok=false,code=code} end}
+    DoorsRepository={New=function() return {} end}
     exports=setmetatable({['feather-core']={
         AwaitReady=function() return {ok=not options.coreFailure} end,
         GetCapabilities=function() return {ok=true,value={contract=options.contract or 1}} end
     }},{__call=function(_,name,handler) state.exports[name]=handler end})
     GetResourceState=function() return state.dependency end
     GetCurrentResourceName=function() return 'feather-doors' end
+    GetInvokingResource=function() return 'untrusted' end
     CreateThread=function(handler) state.thread=handler end
     AddEventHandler=function(name,handler) state.handlers[name]=handler end
     RegisterCommand=function(name,handler) state.commands[name]=handler end
@@ -31,6 +35,8 @@ local function boot(options)
     return state
 end
 local state=boot()
+check(state.exports.CreateDoorGroup({}).code=='forbidden','default caller policy denies API')
+check(state.exports.FindOperation({requestId='other'}).code=='forbidden','default caller policy denies receipts')
 check(state.exports.GetHealth().foundationReady,'schema foundation ready')
 check(state.exports.GetHealth().ready==false,'schema readiness never enables domain')
 check(state.exports.GetCapabilities().schema==1 and not state.exports.GetCapabilities().doorRegistration,'only schema capability enabled')

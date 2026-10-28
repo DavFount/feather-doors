@@ -14,7 +14,10 @@ shared_scripts {
 
 server_scripts {
     '@feather-mysql/lib/DB.lua',
+    'config.lua',
+    'server/contract.lua',
     'server/schema.lua',
+    'server/repository.lua',
     'server/main.lua'
 }
 

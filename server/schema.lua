@@ -1,7 +1,7 @@
 -- Immutable once accepted live. Add migrations rather than editing accepted SQL.
 DoorsSchema = {}
 local definitions = {
-    { id='001_groups_and_leaves', statements={
+    { id='001_groups_and_leaves', tables={'feather_door_groups','feather_door_leaves'}, statements={
         [[CREATE TABLE IF NOT EXISTS `feather_door_groups` (
             `door_id` CHAR(36) NOT NULL,
             `door_key` VARCHAR(100) NOT NULL,
@@ -39,6 +39,16 @@ local definitions = {
             CONSTRAINT `chk_door_ordinal` CHECK (`ordinal` BETWEEN 1 AND 2),
             CONSTRAINT `chk_door_position` CHECK (`x` BETWEEN -20000 AND 20000 AND `y` BETWEEN -20000 AND 20000 AND `z` BETWEEN -2000 AND 5000)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin]]
+    } },
+    { id='002_operation_receipts', tables={'feather_door_operations'}, statements={
+        [[CREATE TABLE IF NOT EXISTS `feather_door_operations` (
+            `source_resource` VARCHAR(100) NOT NULL,
+            `request_id` VARCHAR(128) NOT NULL,
+            `request_json` LONGTEXT NOT NULL,
+            `result_json` LONGTEXT NULL,
+            `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (`source_resource`,`request_id`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin]]
     } }
 }
 local ledger = [[CREATE TABLE IF NOT EXISTS `feather_door_schema_migrations` (
@@ -60,7 +70,8 @@ local expectedColumns={
         status='varchar',locked='tinyint',revision='bigint',delegation_epoch='bigint',startup_policy='varchar',
         created_at='timestamp',updated_at='timestamp'},
     feather_door_leaves={door_hash='bigint',door_id='char',model_hash='bigint',x='double',y='double',z='double',ordinal='tinyint'},
-    feather_door_schema_migrations={id='varchar',checksum='varchar',status='varchar',applied_at='timestamp'}
+    feather_door_schema_migrations={id='varchar',checksum='varchar',status='varchar',applied_at='timestamp'},
+    feather_door_operations={source_resource='varchar',request_id='varchar',request_json='longtext',result_json='longtext',created_at='timestamp'}
 }
 local function knownRows(db)
     local rows=db.query('SELECT `id`,`checksum`,`status` FROM `feather_door_schema_migrations`')
@@ -85,8 +96,10 @@ function DoorsSchema.Run(db)
     for _,migration in ipairs(definitions) do
         local row=found[migration.id]
         if not row then
+            local names={}
+            for _,name in ipairs(migration.tables) do names[#names+1]="'"..name.."'" end
             local existing=tonumber(db.value([[SELECT COUNT(*) FROM information_schema.tables
-                WHERE table_schema=DATABASE() AND table_name IN ('feather_door_groups','feather_door_leaves')]]))
+                WHERE table_schema=DATABASE() AND table_name IN (]]..table.concat(names,',')..')'))
             if existing~=0 then return fail('untracked_schema') end
             db.exec('INSERT INTO `feather_door_schema_migrations` (`id`,`checksum`,`status`) VALUES (?,?,?)',
                 migration.id,checksum(table.concat(migration.statements,'\n-- next statement --\n')),'applying')
@@ -107,12 +120,12 @@ function DoorsSchema.Check(db)
         if not found[migration.id] or found[migration.id].status~='applied' then return fail('migration_incomplete') end
     end
     local tables=tonumber(db.value([[SELECT COUNT(*) FROM information_schema.tables
-        WHERE table_schema=DATABASE() AND table_name IN ('feather_door_schema_migrations','feather_door_groups','feather_door_leaves')
+        WHERE table_schema=DATABASE() AND table_name IN ('feather_door_schema_migrations','feather_door_groups','feather_door_leaves','feather_door_operations')
         AND engine='InnoDB']]))
-    if tables~=3 then return fail('schema_tables_missing') end
+    if tables~=4 then return fail('schema_tables_missing') end
     local columns=db.query([[SELECT table_name AS tableName,column_name AS columnName,data_type AS dataType
         FROM information_schema.columns WHERE table_schema=DATABASE()
-        AND table_name IN ('feather_door_schema_migrations','feather_door_groups','feather_door_leaves')]])
+        AND table_name IN ('feather_door_schema_migrations','feather_door_groups','feather_door_leaves','feather_door_operations')]])
     local seen,count={},0
     for _,column in ipairs(columns) do
         local expected=expectedColumns[column.tableName]

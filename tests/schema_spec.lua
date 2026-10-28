@@ -9,7 +9,8 @@ local function database()
             local shapes={
                 feather_door_groups={door_id='char',door_key='varchar',label='varchar',manager_resource='varchar',status='varchar',locked='tinyint',revision='bigint',delegation_epoch='bigint',startup_policy='varchar',created_at='timestamp',updated_at='timestamp'},
                 feather_door_leaves={door_hash='bigint',door_id='char',model_hash='bigint',x='double',y='double',z='double',ordinal='tinyint'},
-                feather_door_schema_migrations={id='varchar',checksum='varchar',status='varchar',applied_at='timestamp'}
+                feather_door_schema_migrations={id='varchar',checksum='varchar',status='varchar',applied_at='timestamp'},
+                feather_door_operations={source_resource='varchar',request_id='varchar',request_json='longtext',result_json='longtext',created_at='timestamp'}
             }
             local rows={}
             for tableName,columns in pairs(shapes) do
@@ -25,27 +26,31 @@ local function database()
     end
     function db.value(sql)
         if sql:find("engine='InnoDB'",1,true) then return state.tables+1 end
+        if sql:find("IN ('feather_door_operations')",1,true) then return state.operations and 1 or 0 end
         return state.tables
     end
     function db.exec(sql,id,sum,status)
         if state.exceptions then error('database unavailable') end
         if sql:find('INSERT INTO',1,true) then
-            state.rows={{id=id,checksum=sum,status=status}}
-        elseif sql:match('^UPDATE') then state.rows[1].status='applied'
+            state.rows[#state.rows+1]={id=id,checksum=sum,status=status}
+        elseif sql:match('^UPDATE') then
+            for _,row in ipairs(state.rows) do if row.id==id then row.status='applied' end end
         elseif sql:find('CREATE TABLE IF NOT EXISTS `feather_door_groups`',1,true) then
             state.ddl=state.ddl+1; state.tables=math.max(state.tables,1)
             if state.failDDL==1 then error('process interrupted after first DDL') end
         elseif sql:find('CREATE TABLE IF NOT EXISTS `feather_door_leaves`',1,true) then
             state.ddl=state.ddl+1; state.tables=2
             if state.failDDL==2 then error('lost reply after second DDL') end
+        elseif sql:find('CREATE TABLE IF NOT EXISTS `feather_door_operations`',1,true) then
+            state.ddl=state.ddl+1; state.tables=3; state.operations=true
         end
     end
     return db,state
 end
 local db,state=database()
 local result=DoorsSchema.Run(db)
-check(result.ok and result.value.applied==1 and result.value.resumed==0,'fresh migration')
-check(state.rows[1].status=='applied' and state.tables==2,'ledger completed after DDL')
+check(result.ok and result.value.applied==2 and result.value.resumed==0,'fresh migrations')
+check(state.rows[1].status=='applied' and state.rows[2].status=='applied' and state.tables==3,'ledger completed after DDL')
 check(DoorsSchema.Check(db).ok,'read-only schema check')
 local ddl=state.ddl
 result=DoorsSchema.Run(db)
@@ -60,7 +65,7 @@ for _,point in ipairs({1,2}) do
     check(state.rows[1].status=='applying','intent survives interrupted DDL')
     check(not DoorsSchema.Check(db).ok,'partial migration not ready')
     state.failDDL=nil; result=DoorsSchema.Run(db)
-    check(result.ok and result.value.resumed==1 and result.value.applied==0,'same-checksum interrupted migration resumes')
+    check(result.ok and result.value.resumed==1 and result.value.applied==1,'same-checksum interrupted migration resumes')
     check(DoorsSchema.Check(db).ok,'resumed migration checks clean')
 end
 db,state=database(); state.tables=1
