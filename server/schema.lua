@@ -49,6 +49,30 @@ local definitions = {
             `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (`source_resource`,`request_id`)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin]]
+    } },
+    { id='003_change_outbox', tables={'feather_door_outbox'}, statements={
+        [[CREATE TABLE IF NOT EXISTS `feather_door_outbox` (
+            `event_id` CHAR(36) NOT NULL,
+            `door_id` CHAR(36) NOT NULL,
+            `source_resource` VARCHAR(100) NOT NULL,
+            `request_id` VARCHAR(128) NOT NULL,
+            `event_type` VARCHAR(64) NOT NULL,
+            `revision` BIGINT UNSIGNED NOT NULL,
+            `payload_json` LONGTEXT NOT NULL,
+            `status` VARCHAR(16) NOT NULL DEFAULT 'pending',
+            `attempts` INT UNSIGNED NOT NULL DEFAULT 0,
+            `available_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            `published_at` TIMESTAMP NULL,
+            PRIMARY KEY (`event_id`),
+            UNIQUE KEY `uq_door_event_operation` (`source_resource`,`request_id`),
+            KEY `idx_door_outbox_pending` (`status`,`created_at`,`event_id`),
+            CONSTRAINT `fk_door_event_group` FOREIGN KEY (`door_id`) REFERENCES `feather_door_groups` (`door_id`),
+            CONSTRAINT `fk_door_event_receipt` FOREIGN KEY (`source_resource`,`request_id`)
+                REFERENCES `feather_door_operations` (`source_resource`,`request_id`),
+            CONSTRAINT `chk_door_event_status` CHECK (`status` IN ('pending','published','quarantined')),
+            CONSTRAINT `chk_door_event_revision` CHECK (`revision` BETWEEN 1 AND 9007199254740990)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin]]
     } }
 }
 local ledger = [[CREATE TABLE IF NOT EXISTS `feather_door_schema_migrations` (
@@ -71,7 +95,9 @@ local expectedColumns={
         created_at='timestamp',updated_at='timestamp'},
     feather_door_leaves={door_hash='bigint',door_id='char',model_hash='bigint',x='double',y='double',z='double',ordinal='tinyint'},
     feather_door_schema_migrations={id='varchar',checksum='varchar',status='varchar',applied_at='timestamp'},
-    feather_door_operations={source_resource='varchar',request_id='varchar',request_json='longtext',result_json='longtext',created_at='timestamp'}
+    feather_door_operations={source_resource='varchar',request_id='varchar',request_json='longtext',result_json='longtext',created_at='timestamp'},
+    feather_door_outbox={event_id='char',door_id='char',source_resource='varchar',request_id='varchar',event_type='varchar',
+        revision='bigint',payload_json='longtext',status='varchar',attempts='int',available_at='timestamp',created_at='timestamp',published_at='timestamp'}
 }
 local function knownRows(db)
     local rows=db.query('SELECT `id`,`checksum`,`status` FROM `feather_door_schema_migrations`')
@@ -120,12 +146,12 @@ function DoorsSchema.Check(db)
         if not found[migration.id] or found[migration.id].status~='applied' then return fail('migration_incomplete') end
     end
     local tables=tonumber(db.value([[SELECT COUNT(*) FROM information_schema.tables
-        WHERE table_schema=DATABASE() AND table_name IN ('feather_door_schema_migrations','feather_door_groups','feather_door_leaves','feather_door_operations')
+        WHERE table_schema=DATABASE() AND table_name IN ('feather_door_schema_migrations','feather_door_groups','feather_door_leaves','feather_door_operations','feather_door_outbox')
         AND engine='InnoDB']]))
-    if tables~=4 then return fail('schema_tables_missing') end
+    if tables~=5 then return fail('schema_tables_missing') end
     local columns=db.query([[SELECT table_name AS tableName,column_name AS columnName,data_type AS dataType
         FROM information_schema.columns WHERE table_schema=DATABASE()
-        AND table_name IN ('feather_door_schema_migrations','feather_door_groups','feather_door_leaves','feather_door_operations')]])
+        AND table_name IN ('feather_door_schema_migrations','feather_door_groups','feather_door_leaves','feather_door_operations','feather_door_outbox')]])
     local seen,count={},0
     for _,column in ipairs(columns) do
         local expected=expectedColumns[column.tableName]

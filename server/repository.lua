@@ -87,6 +87,7 @@ function DoorsRepository.New(db,allowed)
             end
             if not result and not row then error('group_missing_after_write') end
             result=result or C.Ok(snapshot(tx,row))
+            if result.ok then DoorsEvents.Record(tx,caller,kind,normalized,result.value) end
             tx.exec([[UPDATE `feather_door_operations` SET `result_json`=?
                 WHERE `source_resource`=? AND `request_id`=?]],json.encode(result),caller,normalized.requestId)
             return result
@@ -125,6 +126,17 @@ function DoorsRepository.New(db,allowed)
                     locked=tonumber(row.locked)==1,revision=tonumber(row.revision)}
             end
             return C.Ok({groups=values,nextCursor=#rows>limit and values[#values].doorId or false})
+        end)
+    end
+    function api:Event(caller,request)
+        if not C.Fields(request,{requestId=true}) or not C.Token(request.requestId,128) then return C.Err('invalid_request') end
+        return transact(caller,function(tx)
+            local row=tx.one([[SELECT `event_id`,`event_type`,`door_id`,`source_resource`,`request_id`,`revision`,`payload_json`,`status`,`attempts` FROM `feather_door_outbox`
+                WHERE `source_resource`=? AND `request_id`=?]],caller,request.requestId)
+            if not row then return C.Err('not_found') end
+            local payload=DoorsEvents.Decode(row.payload_json)
+            if not DoorsEvents.Matches(row,payload) then return C.Err('invalid_persistence') end
+            return C.Ok({eventId=row.event_id,eventType=row.event_type,payload=payload,status=row.status,attempts=tonumber(row.attempts)})
         end)
     end
     return api

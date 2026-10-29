@@ -4,12 +4,15 @@ local function boot(options)
     options=options or {}
     local state={exports={},commands={},handlers={},messages={},dependency='started',dbCalls=0}
     FeatherDoors={Name='feather-doors',Version='0.1.0-dev'}
-    DoorsConfig={TrustedResources={}}
+    DoorsConfig={TrustedResources={},Outbox={Enabled=false}}
     DoorsContract={Err=function(code) return {ok=false,code=code} end}
     DoorsRepository={New=function() return {} end}
+    DoorsEvents={Names={definition='doors.definition.changed.v1',state='doors.state.changed.v1'},
+        Validate=function() return true end,New=function() return {enabled=false,busy=false,lastCode='idle'} end}
     exports=setmetatable({['feather-core']={
         AwaitReady=function() return {ok=not options.coreFailure} end,
-        GetCapabilities=function() return {ok=true,value={contract=options.contract or 1}} end
+        GetCapabilities=function() return {ok=true,value={contract=options.contract or 1}} end,
+        DeclareEvent=function() return {ok=not options.eventFailure} end
     }},{__call=function(_,name,handler) state.exports[name]=handler end})
     GetResourceState=function() return state.dependency end
     GetCurrentResourceName=function() return 'feather-doors' end
@@ -49,7 +52,7 @@ for _,options in ipairs({{coreFailure=true},{contract=2},{dbFailure=true}}) do
     state=boot(options)
     check(not state.exports.GetHealth().foundationReady and state.dbCalls==0,'bad dependency cannot migrate')
 end
-for _,options in ipairs({{migrationFailure=true},{checkFailure=true},{exception=true},{stopDuringMigration=true}}) do
+for _,options in ipairs({{migrationFailure=true},{checkFailure=true},{exception=true},{stopDuringMigration=true},{eventFailure=true}}) do
     state=boot(options)
     check(not state.exports.GetHealth().foundationReady,'startup failure never marks ready')
 end

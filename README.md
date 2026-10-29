@@ -21,8 +21,9 @@ Unsigned model hashes must eventually be normalized to uint32 at the API boundar
 `feather_door_schema_migrations` journals checksum and applying/applied state.
 DDL auto-commits; interrupted same-checksum application can resume. Unknown or
 changed migrations, unjournaled domain tables and missing/wrong column types
-fail startup. Migration 002 adds caller-scoped operation receipts; accepted
-migration 001 SQL is unchanged. Do not edit accepted migrations or manually mark failed rows applied.
+fail startup. Migration 002 adds caller-scoped operation receipts; migration 003
+adds the transactional change outbox. Accepted migration 001/002 SQL is unchanged.
+Do not edit accepted migrations or manually mark failed rows applied.
 There is no destructive rollback or automatic schema repair.
 
 The internal `client/native.lua` adapter is now available for Phase 0 proof. It
@@ -53,9 +54,9 @@ local health = exports['feather-doors']:GetHealth()
 
 Both return fresh tables. Capabilities identifies the resource/version/stage
 and reports physical/player features as `false`. `schema`, `trustedDefinitions`
-and `durableReceipts` become 1 only when the foundation is ready. Health keeps
+and `durableReceipts`/`changeEvents` become 1 only when the foundation is ready. Health keeps
 operational `ready=false` and exposes
-`stage='trusted_api_foundation'`, `foundationReady`, `schemaVersion`,
+`stage='event_foundation'`, `foundationReady`, `schemaVersion`,
 `migrationsApplied`, `migrationsResumed`, and `status='foundation_ready'` on
 successful schema startup. A required resource stop latches foundation readiness
 off until Doors is restarted. These diagnostic shapes remain provisional.
@@ -63,7 +64,7 @@ No player routes or operational AwaitReady are provided. Consumer server APIs
 must check foundationReady plus the relevant feature, not operational ready.
 
 Server-console command `DoorsSchemaSmokeTest` is read-only: it verifies migration
-checksums/completion, four InnoDB tables and 27 expected column names/types.
+checksums/completion, five InnoDB tables and 39 expected column names/types.
 It does not test SQL constraints, transactional CRUD, receipt recovery or native
 behavior. Run it again after restarting Doors; first install should log
 applied=1/resumed=0 and an ordinary second startup applied=0/resumed=0.
@@ -89,6 +90,7 @@ All calls return `{ok=true,value=...}` or `{ok=false,code,message}`.
 | FindDoorByKey | key |
 | ListDoorGroups | limit? (1–50, default 20), after? (UUID cursor) |
 | FindOperation | requestId |
+| GetOperationEvent | requestId |
 
 Leaves contain `hash`, `model` (uint32 integers), `x`, `y`, `z` (bounded finite
 numbers). They are copied on validation. Keys/leaf identity/geometry/manager are
@@ -110,13 +112,72 @@ original result; changed payload is request_conflict. Stale/retired/not-found
 results are durable too; a corrected operation needs a new requestId. Unique
 key/hash collision with confirmed rollback returns definition_conflict. Unknown
 database/commit outcomes return pending_recovery: look up/retry the same request,
-never issue a new mutation ID to guess whether it committed. No receipt pruning,
-Audit integration or outbox delivery is implemented in this slice.
+never issue a new mutation ID to guess whether it committed. No receipt pruning
+or Audit integration is implemented. GetOperationEvent returns the caller's
+eventId/eventType/payload/status/attempts for a successful mutation. Historical
+operations from before migration003 have no fabricated events or backfill.
 
 Server-console `DoorsApiFixture enable|disable` grants/revokes only the exact
 disposable `feather-doors-api-tests` caller until the next Doors restart. It does
 not alter config or enable any player routes. Run the protocol in framework docs
 `feather-doors/TRUSTED_API_ACCEPTANCE.md`; leave the fixture disabled afterward.
+
+## Committed change notifications
+
+Successful mutations write one outbox row in the same transaction as group and
+receipt. Replays and rejected mutations do not add events. Rows retain stable
+event IDs, caller/request correlation, minimal status/revision/epoch/locked facts,
+and publication status. Keys, labels, leaves, player identity and grant data are
+not included. Core declares `doors.definition.changed.v1` for create/update/
+retirement and `doors.state.changed.v1` for SetLockState. Payload contract is 1.
+
+Subscribers use Core SubscribeEvent; only the declaring Doors resource may
+publish. Treat events as invalidations, not authorization or physical state.
+Reread the appropriate authority, deduplicate eventId and handle older revisions:
+global/per-door delivery ordering is not promised. Manager-scoped reads remain
+enforced; subscribing does not grant access to another manager's data.
+
+Publisher acknowledges only Core ok with zero failed listeners. A listener error
+retries the stable ID after five seconds, including to previously successful
+listeners. Successful broker acceptance with zero subscribers also publishes the
+row. This is at-least-once publication, not durable per-consumer delivery or Audit
+ingestion. Listeners must handle duplicate IDs and persist their own workflow
+receipts where needed. Offline subscribers have no automatic catch-up cursor.
+
+`DoorsConfig.Outbox.Enabled` defaults false until acceptance. When enabled, one
+serial worker polls each second in batches of at most 20. Acknowledgement loss
+can republish after restart. Invalid JSON/identity/payload rows are quarantined,
+not silently delivered or deleted. Published/quarantined rows are retained; no
+automatic repair/purge is provided. This worker targets a single FXServer domain
+instance; shared-database multi-host publication is not a supported contract.
+
+Server-console `DoorsOutbox status|pause|resume|drain` reports aggregate state,
+controls the runtime polling flag or processes one batch. Pause affects future
+automatic batches; an in-flight batch can finish. Manual drain works while
+paused. Runtime pause/resume resets to config on restart. Health includes outbox
+enabled/busy/lastCode without doing SQL. Pending events survive ordinary restart;
+consumer failure, database failure and Core failure never retroactively undo an
+already committed mutation. Core/dependency loss latches the foundation off.
+
+Server-console `DoorsEventFixture enable|disable` temporarily permits only the
+separate `feather-doors-outbox-tests` caller, resetting on restart or fixture stop.
+The normal API fixture is unchanged. Use the framework OUTBOX_ACCEPTANCE.md
+protocol; the first listener failure is deliberate and expected.
+
+Persisted JSON is decoded and copied through bounded raw iteration into plain
+tables before strict validation. The running lua-rapidjson decoder retains object
+metadata despite dkjson-style nil metadata arguments; the installed legacy
+json.lua file alone does not identify the active codec. Ordinary API requests
+still reject metatables. Trailing garbage, scalar and
+oversized stored JSON are refused. The installed runtime decoder is exercised
+by tests/runtime_json_spec.lua (supply its json.lua path as argument1).
+
+Server-console `DoorsOutbox recover-fixture` is a narrowly scoped repair for the
+four existing doors-outbox-v1 acceptance facts. It requires paused/idle publishing,
+validates every payload/row against its original successful receipt under row
+locks, then requeues only quarantined rows. Pending/published rows are unchanged;
+IDs, payloads, receipts, group data and attempts are never rewritten. It is not
+a generic quarantine replay or payload repair API. Do not reseed the used fixture.
 
 ## Resource ownership
 

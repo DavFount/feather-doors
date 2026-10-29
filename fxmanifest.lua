@@ -17,6 +17,7 @@ server_scripts {
     'config.lua',
     'server/contract.lua',
     'server/schema.lua',
+    'server/events.lua',
     'server/repository.lua',
     'server/main.lua'
 }

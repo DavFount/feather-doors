@@ -1,6 +1,8 @@
 local foundation={ready=false,status='starting',schemaVersion=0,applied=0,resumed=0}
 local stopped=false
 local fixtureEnabled=false
+local eventFixtureEnabled=false
+local publisher
 local function dependencies()
     return GetResourceState('feather-mysql')=='started' and GetResourceState('feather-core')=='started'
 end
@@ -9,23 +11,28 @@ local function health()
     return {
         resource=FeatherDoors.Name,ready=false,status=ready and 'foundation_ready'
             or (foundation.ready and 'dependency_unavailable' or foundation.status),
-        stage='trusted_api_foundation',foundationReady=ready,schemaVersion=foundation.schemaVersion,
-        migrationsApplied=foundation.applied,migrationsResumed=foundation.resumed
+        stage='event_foundation',foundationReady=ready,schemaVersion=foundation.schemaVersion,
+        migrationsApplied=foundation.applied,migrationsResumed=foundation.resumed,
+        outbox=publisher and {enabled=publisher.enabled,busy=publisher.busy,lastCode=publisher.lastCode} or nil
     }
 end
 exports('GetCapabilities',function()
-    return {resource=FeatherDoors.Name,version=FeatherDoors.Version,stage='trusted_api_foundation',
+    return {resource=FeatherDoors.Name,version=FeatherDoors.Version,stage='event_foundation',
         doorRegistration=false,lockState=false,persistence=false,synchronization=false,playerInteraction=false,
         schema=health().foundationReady and 1 or 0,trustedDefinitions=health().foundationReady and 1 or 0,
-        durableReceipts=health().foundationReady and 1 or 0}
+        durableReceipts=health().foundationReady and 1 or 0,changeEvents=health().foundationReady and 1 or 0}
 end)
 exports('GetHealth',health)
 local function authorized(caller)
     return type(caller)=='string' and
-        (DoorsConfig.TrustedResources[caller]==true or fixtureEnabled and caller=='feather-doors-api-tests')
+        (DoorsConfig.TrustedResources[caller]==true or fixtureEnabled and caller=='feather-doors-api-tests'
+            or eventFixtureEnabled and caller=='feather-doors-outbox-tests')
 end
 local function allowed(caller) return authorized(caller) and health().foundationReady end
 local repository=DoorsRepository.New(DB,allowed)
+publisher=DoorsEvents.New(DB,function(name,payload)
+    return exports['feather-core']:PublishEvent(name,payload)
+end,function() return health().foundationReady end)
 local function register(name,method,kind)
     exports(name,function(request)
         local caller=GetInvokingResource()
@@ -44,6 +51,7 @@ register('GetDoorGroup','Get')
 register('FindDoorByKey','ByKey')
 register('ListDoorGroups','List')
 register('FindOperation','Find')
+register('GetOperationEvent','Event')
 RegisterCommand('DoorsApiFixture',function(player,args)
     if player~=0 then return end
     if #args~=1 or args[1]~='enable' and args[1]~='disable' then
@@ -51,6 +59,38 @@ RegisterCommand('DoorsApiFixture',function(player,args)
     end
     fixtureEnabled=args[1]=='enable'
     print('[feather-doors] temporary feather-doors-api-tests authority '..(fixtureEnabled and 'enabled' or 'disabled'))
+end,true)
+RegisterCommand('DoorsEventFixture',function(player,args)
+    if player~=0 then return end
+    if #args~=1 or args[1]~='enable' and args[1]~='disable' then
+        print('[feather-doors] Server console: DoorsEventFixture <enable|disable>'); return
+    end
+    eventFixtureEnabled=args[1]=='enable'
+    print('[feather-doors] temporary feather-doors-outbox-tests authority '..(eventFixtureEnabled and 'enabled' or 'disabled'))
+end,true)
+RegisterCommand('DoorsOutbox',function(player,args)
+    if player~=0 then return end
+    if #args~=1 or not ({status=true,pause=true,resume=true,drain=true,['recover-fixture']=true,['diagnose-fixture']=true})[args[1]] then
+        print('[feather-doors] Server console: DoorsOutbox <status|pause|resume|drain|recover-fixture|diagnose-fixture>'); return
+    end
+    if not health().foundationReady then print('[feather-doors] outbox unavailable'); return end
+    local ok,result=pcall(function()
+        if args[1]=='pause' then publisher.enabled=false
+        elseif args[1]=='resume' then publisher.enabled=true
+        elseif args[1]=='drain' then return publisher:Drain()
+        elseif args[1]=='diagnose-fixture' then return DoorsEvents.DiagnoseFixture(DB)
+        elseif args[1]=='recover-fixture' then
+            if publisher.enabled or publisher.busy then return DoorsContract.Err('pause_and_wait_for_idle') end
+            return DoorsEvents.RecoverFixture(DB)
+        end
+        return DoorsContract.Ok(publisher:Status())
+    end)
+    if ok and result.ok and args[1]=='diagnose-fixture' then
+        print('[feather-doors] outbox decoder '..result.value.decoderVersion)
+        for _,row in ipairs(result.value.rows) do print('[feather-doors] outbox diagnostic '..json.encode(row)) end
+        return
+    end
+    print('[feather-doors] outbox '..json.encode(ok and result or DoorsContract.Err('database_exception')))
 end,true)
 local function fail(code)
     foundation.ready=false; foundation.status=code
@@ -71,10 +111,23 @@ CreateThread(function()
         if not migrated.ok then return migrated end
         local checked=DoorsSchema.Check(DB)
         if not checked.ok then return checked end
+        for _,name in pairs(DoorsEvents.Names) do
+            local eventName=name
+            local declared=exports['feather-core']:DeclareEvent(eventName,{contract=1,maxPayloadBytes=2048,maxDepth=2,maxNodes=32,maxSubscribers=64,
+                validatePayload=function(payload) return DoorsEvents.Validate(payload,eventName) end})
+            if type(declared)~='table' or declared.ok~=true then return {ok=false,code='event_declaration_failed'} end
+        end
         if stopped or not dependencies() then return {ok=false,code='dependency_stopped'} end
         foundation.schemaVersion=migrated.value.version
         foundation.applied=migrated.value.applied; foundation.resumed=migrated.value.resumed
         foundation.status='foundation_ready'; foundation.ready=true
+        publisher.enabled=DoorsConfig.Outbox.Enabled==true
+        CreateThread(function()
+            while not stopped do
+                if publisher.enabled and health().foundationReady then publisher:Drain() end
+                Wait(1000)
+            end
+        end)
         print(('[feather-doors] foundation ready schema=%d applied=%d resumed=%d; player/native operations disabled'):format(
             foundation.schemaVersion,foundation.applied,foundation.resumed))
         return {ok=true}
@@ -83,8 +136,11 @@ CreateThread(function()
     elseif not result.ok then fail(result.code) end
 end)
 AddEventHandler('onResourceStop',function(resource)
+    if resource=='feather-doors-api-tests' then fixtureEnabled=false end
+    if resource=='feather-doors-outbox-tests' then eventFixtureEnabled=false end
     if resource=='feather-core' or resource=='feather-mysql' or resource==GetCurrentResourceName() then
         stopped=true; foundation.ready=false; foundation.status='dependency_stopped'
+        publisher.enabled=false
     end
 end)
 RegisterCommand('DoorsSchemaSmokeTest',function(player,args)
