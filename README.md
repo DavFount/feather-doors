@@ -56,7 +56,7 @@ Both return fresh tables. Capabilities identifies the resource/version/stage
 and reports physical/player features as `false`. `schema`, `trustedDefinitions`
 and `durableReceipts`/`changeEvents` become 1 only when the foundation is ready. Health keeps
 operational `ready=false` and exposes
-`stage='event_foundation'`, `foundationReady`, `schemaVersion`,
+`stage='access_target_foundation'`, `foundationReady`, `schemaVersion`,
 `migrationsApplied`, `migrationsResumed`, and `status='foundation_ready'` on
 successful schema startup. A required resource stop latches foundation readiness
 off until Doors is restarted. These diagnostic shapes remain provisional.
@@ -91,6 +91,7 @@ All calls return `{ok=true,value=...}` or `{ok=false,code,message}`.
 | ListDoorGroups | limit? (1–50, default 20), after? (UUID cursor) |
 | FindOperation | requestId |
 | GetOperationEvent | requestId |
+| GetDoorTargetContext | doorId (caller-managed group; registered Access provider required) |
 
 Leaves contain `hash`, `model` (uint32 integers), `x`, `y`, `z` (bounded finite
 numbers). They are copied on validation. Keys/leaf identity/geometry/manager are
@@ -178,6 +179,31 @@ validates every payload/row against its original successful receipt under row
 locks, then requeues only quarantined rows. Pending/published rows are unchanged;
 IDs, payloads, receipts, group data and attempts are never rewritten. It is not
 a generic quarantine replay or payload repair API. Do not reseed the used fixture.
+
+## Optional Access target provider
+
+Access config must declare doors.group owner feather-doors, vocabulary door.lock/
+door.unlock and Providers.TrustedReaders['feather-doors']=true. No grant reader,
+manager or Core service policy is added. Access is optional; base Doors still
+starts without it. This provider enables target facts, not player authorization.
+
+Server-console DoorsAccess register|unregister|status controls explicit provider
+registration. It starts unregistered. Duplicate registration refuses replacement;
+Access stop invalidates local state. Use explicit re-registration after recovery,
+not broad sibling restarts. Health exposes access registered/lastCode and
+capabilities exposes accessTargetProvider. None is a permission token.
+
+GetDoorTargetContext returns Access's targetType/targetId/epoch/status/
+capabilities/provider envelope, checking current manager and facts before/after
+yields. Suspension/resumption/retirement advance epoch; metadata does not.
+CheckDoorAccess is not implemented; grantManagement/playerAuthorization stay
+false. Grant-management callback denies all requests until a separate actor/
+Property/staff contract is proven. Managing a definition confers no grant rights.
+
+Server-console DoorsAccessFixture enable|disable permits only the isolated
+feather-doors-access-tests caller until restart/fixture stop. That fixture has no
+direct Access reader/manager trust. Framework ACCESS_TARGET_ACCEPTANCE.md owns
+the coordinated Access/Doors activation and headless test protocol.
 
 ## Resource ownership
 

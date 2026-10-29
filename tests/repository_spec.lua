@@ -170,6 +170,7 @@ local fixtureCommands,messages={},{}
 local methods={CreateDoorGroup='create',UpdateDoorGroup='update',DeleteDoorGroup='retire',SetLockState='state'}
 local fixtureAllowed=false
 local fixtureCaller='feather-doors-api-tests'
+local targetAdapter
 exports={['feather-doors']=setmetatable({},{__index=function(_,name)
     return function(_,spec)
         if not fixtureAllowed then return C.Err('forbidden') end
@@ -180,6 +181,7 @@ exports={['feather-doors']=setmetatable({},{__index=function(_,name)
         if name=='ListDoorGroups' then return api:List(caller,spec) end
         if name=='FindOperation' then return api:Find(caller,spec) end
         if name=='GetOperationEvent' then return api:Event(caller,spec) end
+        if name=='GetDoorTargetContext' then return targetAdapter:Context(caller,spec) end
         error('unknown export')
     end
 end})}
@@ -256,4 +258,34 @@ print=actualPrint
 check(drained.value.published==3 and drained.value.retried==1 and retried.value.published==1,'recovered fixture failure/restart/retry scenario')
 for _,message in ipairs(messages) do check(not message:find('FAIL',1,true),'actual recovered fixture no assertion failure') end
 check(messages[#messages]=='[doors-outbox-tests] completed verify','recovered fixture verification completes')
+-- Real lifecycle fixture through real repository/adapter, mocked Access transport.
+dofile('server/access.lua')
+data={groups={},leaves={},receipts={},outbox={}}
+fixtureCaller='feather-doors-access-tests'
+local provider,providerGeneration=nil,0
+function db.one(_,targetId) return data.groups[targetId] and copy(data.groups[targetId]) end
+targetAdapter=DoorsAccess.New(db,{available=function() return true end,call=function(name,request)
+    if name=='AwaitReady' then return C.Ok(true) end
+    if name=='GetCapabilities' then return C.Ok({contract=1}) end
+    if name=='RegisterTargetProvider' then provider=request;providerGeneration=providerGeneration+1;return C.Ok(true) end
+    if name=='UnregisterTargetProvider' then provider=nil;return C.Ok(true) end
+    if name=='ResolveTargetContext' then
+        local result=provider.resolve(request)
+        if result.ok then result.value.provider={resource='feather-doors',contract=1,generation=providerGeneration} end
+        return result
+    end
+end},function() return true end)
+exports['feather-access']={ResolveTargetContext=function() return C.Err('authorization_denied') end,
+    GrantCapability=function() return C.Err('authorization_denied') end}
+fixtureAllowed=false;messages={};print=function(message) messages[#messages+1]=message end
+dofile('../feather-doors-access-tests/server.lua')
+fixtureCommands.DoorsAccessSmokeTest(0,{'denied'})
+fixtureAllowed=true;targetAdapter:Register()
+fixtureCommands.DoorsAccessSmokeTest(0,{'run'})
+targetAdapter:Unregister();fixtureCommands.DoorsAccessSmokeTest(0,{'unregistered'})
+targetAdapter:Register();fixtureCommands.DoorsAccessSmokeTest(0,{'verify'})
+fixtureAllowed=false;fixtureCommands.DoorsAccessSmokeTest(0,{'denied'})
+print=actualPrint
+for _,message in ipairs(messages) do check(not message:find('FAIL',1,true),'actual Access lifecycle fixture no assertion failure') end
+check(messages[#messages]:find('3/3 passed',1,true)~=nil,'actual Access fixture completes final denial')
 print(('PASS %d repository/contract checks'):format(passed))
