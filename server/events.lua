@@ -1,7 +1,7 @@
 DoorsEvents = {}
 local E=DoorsEvents
 E.Names={definition='doors.definition.changed.v1',state='doors.state.changed.v1'}
-local kinds={create=true,update=true,state=true,retire=true}
+local kinds={create=true,update=true,state=true,control=true,retire=true}
 function E.Decode(text)
     if type(text)~='string' or #text>2048 then return nil end
     -- Runtime rapidjson can retain JSON metadata despite dkjson-compatible
@@ -39,7 +39,7 @@ function E.Validate(payload,name)
         and C.Token(payload.sourceResource,100) and C.Token(payload.requestId,128) and C.Token(payload.reasonCode,64)
         and kinds[payload.operation]==true and type(payload.locked)=='boolean'
         and (payload.status=='active' or payload.status=='suspended' or payload.status=='retired')
-        and payload.eventType==(payload.operation=='state' and E.Names.state or E.Names.definition)
+        and payload.eventType==((payload.operation=='state' or payload.operation=='control') and E.Names.state or E.Names.definition)
         and payload.eventType==name
 end
 function E.Matches(row,payload)
@@ -48,7 +48,7 @@ function E.Matches(row,payload)
         and payload.revision==tonumber(row.revision)
 end
 function E.Record(tx,caller,kind,request,snapshot)
-    local name=kind=='state' and E.Names.state or E.Names.definition
+    local name=(kind=='state' or kind=='control') and E.Names.state or E.Names.definition
     local payload={contract=1,eventId=tx.value('SELECT UUID() AS event_id'),eventType=name,
         doorId=snapshot.doorId,revision=snapshot.revision,delegationEpoch=snapshot.delegationEpoch,
         sourceResource=caller,requestId=request.requestId,reasonCode=request.reasonCode,

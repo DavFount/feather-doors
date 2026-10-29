@@ -92,6 +92,9 @@ All calls return `{ok=true,value=...}` or `{ok=false,code,message}`.
 | FindOperation | requestId |
 | GetOperationEvent | requestId |
 | GetDoorTargetContext | doorId (caller-managed group; registered Access provider required) |
+| GetControlledDoor | key (exact configured service-controller scope) |
+| SetControlledLockState | key, expectedRevision, locked:boolean, requestId, reasonCode |
+| FindControlledOperation | key, requestId (exact service scope and caller receipt) |
 
 Leaves contain `hash`, `model` (uint32 integers), `x`, `y`, `z` (bounded finite
 numbers). They are copied on validation. Keys/leaf identity/geometry/manager are
@@ -204,6 +207,40 @@ Server-console DoorsAccessFixture enable|disable permits only the isolated
 feather-doors-access-tests caller until restart/fixture stop. That fixture has no
 direct Access reader/manager trust. Framework ACCESS_TARGET_ACCEPTANCE.md owns
 the coordinated Access/Doors activation and headless test protocol.
+
+## Global service control
+
+Configure DoorsConfig.ServiceControllers as exact resource -> exact key -> true.
+For example, bcc-banks could be allowed only global.valentine.bank.entry. The map
+ships empty. This policy is for trusted server-service state control; it is not
+a second player grant ledger. No wildcard, actor spoofing or client registration.
+
+GetControlledDoor returns only doorId/key/status/locked/revision/delegationEpoch.
+SetControlledLockState changes desired SQL state through the normal receipt and
+revision pipeline, even for a definition managed by a different resource. It
+does not edit identity/metadata, retire a definition or issue access. Public owner
+APIs remain manager-only. FindControlledOperation returns the original result
+only if it is tagged with that exact controlKey and caller. Check current state
+separately; historical replays are not fresh state. Configuration revocation is
+rechecked after yields before commit, not advertised as a distributed fence.
+
+The banking service chooses its approved clock and public hours. Doors supplies
+no scheduler or implicit job permission. Use desired states, expected revisions
+and stable IDs per immutable request. Do not blindly overwrite stale revisions or
+repeat unknown outcomes under new IDs. Successful service mutations emit the
+existing state event with operation=control; payload consumers must accept this
+additional contract1 operation. No SQL schema change is required.
+
+Native replication remains disabled: these APIs do not physically open the bank
+yet. Global native door state is shared; permitted unlock is not per-player
+passage isolation. Employee access will require explicitly issued Access grants,
+not job membership alone. Property/staff grant-management implementation remains
+disabled, as designed in framework GRANT_AUTHORITY_DESIGN.md.
+
+Console-only DoorsControllerFixture enable|disable temporarily permits separate
+owner/controller test resources for one synthetic key, resetting on restart or
+either fixture stop. See framework SERVICE_CONTROL_ACCEPTANCE.md. No real bank
+resource is enabled by this fixture or the default config.
 
 ## Resource ownership
 

@@ -29,13 +29,16 @@ function C.Validate(kind,request)
     local extra=kind=='create' and {'key','label','locked','startupPolicy','leaves'}
         or kind=='update' and {'doorId','expectedRevision','label','status','startupPolicy'}
         or kind=='state' and {'doorId','expectedRevision','locked'}
+        or kind=='control' and {'key','expectedRevision','locked'}
         or kind=='retire' and {'doorId','expectedRevision'} or nil
     if not extra then return nil end
     for _,k in ipairs(extra) do fields[k]=true end
     if not C.Fields(request,fields) or not C.Token(request.requestId,128) or not C.Token(request.reasonCode,64) then return nil end
     local out={requestId=request.requestId,reasonCode=request.reasonCode}
     for _,key in ipairs(extra) do out[key]=request[key] end
-    if kind~='create' then
+    if kind=='control' then
+        if not C.Token(out.key,100) or not C.Int(out.expectedRevision,1,C.MaxRevision) then return nil end
+    elseif kind~='create' then
         if not C.Uuid(out.doorId) or not C.Int(out.expectedRevision,1,C.MaxRevision) then return nil end
         out.doorId=out.doorId:lower()
     end
@@ -67,6 +70,6 @@ function C.Validate(kind,request)
     if out.startupPolicy~=nil and not policies[out.startupPolicy] then return nil end
     if out.status~=nil and out.status~='active' and out.status~='suspended' then return nil end
     if kind=='update' and out.label==nil and out.status==nil and out.startupPolicy==nil then return nil end
-    if kind=='state' and type(out.locked)~='boolean' then return nil end
+    if (kind=='state' or kind=='control') and type(out.locked)~='boolean' then return nil end
     return out
 end

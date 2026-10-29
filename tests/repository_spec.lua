@@ -87,7 +87,10 @@ function db.transaction(callback)
     if loseAfterCommit and result then loseAfterCommit=false; error('commit reply lost') end
     return result
 end
-local api=DoorsRepository.New(db,function() return enabled end)
+local controlPermissions={}
+local api=DoorsRepository.New(db,function() return enabled end,function(caller,key)
+    return enabled and type(controlPermissions[caller])=='table' and controlPermissions[caller][key]==true
+end)
 local create={requestId='create',reasonCode='test',key='test.door',label='Test',locked=true,
     leaves={{hash=123,model=456,x=0,y=0,z=0}}}
 check(not C.Validate('create',{}),'reject empty request')
@@ -164,6 +167,33 @@ failOutbox=false
 data.outbox['owner/create']=nil
 check(api:Mutate('owner','create',create).value.revision==1 and not data.outbox['owner/create'],'old receipt replay does not fabricate event backfill')
 -- Exercise the real operator fixture through mocked Cfx exports. Worker calls
+-- Controller policy is separate from definition ownership and player grants.
+data={groups={},leaves={},receipts={},outbox={}}
+check(api:Mutate('owner','create',create).ok,'service proof owner definition')
+controlPermissions.service={['test.door']=true}
+local serviceRead=api:ControlGet('service',{key='test.door'})
+check(serviceRead.ok and serviceRead.value.revision==1,'delegated service can read exact key')
+check(serviceRead.value.label==nil and serviceRead.value.leaves==nil,'controller projection excludes owner data')
+local open={key='test.door',requestId='service-open',reasonCode='bank.hours',expectedRevision=1,locked=false}
+local controlled=api:Mutate('service','control',open)
+check(controlled.ok and controlled.value.revision==2 and not controlled.value.locked,'controller changes another manager desired state')
+check(api:Mutate('service','control',open).value.revision==2 and data.groups[id].revision==2,'controller replay immutable')
+check(api:ControlFind('service',{key='test.door',requestId='service-open'}).value.result.value.revision==2,'controller receipt scoped recovery')
+check(api:Event('service',{requestId='service-open'}).value.eventType==DoorsEvents.Names.state,'controller produces state event')
+local closed=copy(open);closed.locked=true
+check(api:Mutate('service','control',closed).code=='request_conflict','controller payload conflict')
+closed.requestId='service-stale'
+check(api:Mutate('service','control',closed).code=='revision_conflict','stale scheduled intent refused')
+check(api:ControlFind('service',{key='other',requestId='service-open'}).code=='unavailable','wrong-key receipt scope denied')
+data.receipts['service/private']={result_json=json.encode(C.Ok({key='test.door'}))}
+check(api:ControlFind('service',{key='test.door',requestId='private'}).code=='not_found','controller cannot recover untagged owner receipts')
+closed.expectedRevision=2;closed.requestId='service-revoked';revokeDuringWrite=true
+check(api:Mutate('service','control',closed).code=='unavailable','controller policy revalidated before commit')
+check(data.groups[id].revision==2 and not data.receipts['service/service-revoked'] and not data.outbox['service/service-revoked'],
+    'revoked controller transaction fully rolls back')
+revokeDuringWrite=false;enabled=true;controlPermissions={}
+check(not api:ControlGet('service',{key='test.door'}).ok,'revocation denies future controller reads')
+-- Exercise the real operator fixture through mocked Cfx exports. Worker calls
 -- run sequentially here; only MariaDB live acceptance establishes row contention.
 data={groups={},leaves={},receipts={},outbox={}}
 local fixtureCommands,messages={},{}
@@ -173,6 +203,14 @@ local fixtureCaller='feather-doors-api-tests'
 local targetAdapter
 exports={['feather-doors']=setmetatable({},{__index=function(_,name)
     return function(_,spec)
+        if name=='GetControlledDoor' or name=='SetControlledLockState' or name=='FindControlledOperation' then
+            local scopes=controlPermissions[fixtureCaller]
+            if not scopes or scopes[spec.key]~=true then return C.Err('forbidden') end
+            if name=='GetControlledDoor' then return api:ControlGet(fixtureCaller,spec) end
+            if name=='SetControlledLockState' then return api:Mutate(fixtureCaller,'control',spec) end
+            return api:ControlFind(fixtureCaller,spec)
+        end
+        if fixtureCaller=='feather-doors-service-tests' then return C.Err('forbidden') end
         if not fixtureAllowed then return C.Err('forbidden') end
         local caller=fixtureCaller
         if methods[name] then return api:Mutate(caller,methods[name],spec) end
@@ -288,4 +326,21 @@ fixtureAllowed=false;fixtureCommands.DoorsAccessSmokeTest(0,{'denied'})
 print=actualPrint
 for _,message in ipairs(messages) do check(not message:find('FAIL',1,true),'actual Access lifecycle fixture no assertion failure') end
 check(messages[#messages]:find('3/3 passed',1,true)~=nil,'actual Access fixture completes final denial')
+-- Two actual fixture scripts, distinct manager/controller identities.
+data={groups={},leaves={},receipts={},outbox={}};fixtureAllowed=true
+messages={};print=function(message) messages[#messages+1]=message end
+dofile('../feather-doors-service-owner-tests/server.lua')
+dofile('../feather-doors-service-tests/server.lua')
+fixtureCaller='feather-doors-service-tests';fixtureCommands.DoorsServiceTest(0,{'denied'})
+controlPermissions[fixtureCaller]={['doors.fixture.service.v1']=true}
+fixtureCaller='feather-doors-service-owner-tests';fixtureCommands.DoorsServiceOwnerTest(0,{'seed'})
+fixtureCaller='feather-doors-service-tests';fixtureCommands.DoorsServiceTest(0,{'run'})
+fixtureCommands.DoorsServiceTest(0,{'verify'})
+fixtureCaller='feather-doors-service-owner-tests';fixtureCommands.DoorsServiceOwnerTest(0,{'verify'})
+fixtureCommands.DoorsServiceOwnerTest(0,{'retire'})
+fixtureCaller='feather-doors-service-tests';fixtureCommands.DoorsServiceTest(0,{'retired'})
+controlPermissions={};fixtureCommands.DoorsServiceTest(0,{'denied'})
+print=actualPrint
+for _,message in ipairs(messages) do check(not message:find('FAIL',1,true),'service controller/owner fixture no assertion failure') end
+check(messages[#messages]:find('1/1 passed',1,true)~=nil,'service fixture ends with denial')
 print(('PASS %d repository/contract checks'):format(passed))

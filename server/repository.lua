@@ -1,5 +1,5 @@
 DoorsRepository = {}
-function DoorsRepository.New(db,allowed)
+function DoorsRepository.New(db,allowed,controlled)
     local C=DoorsContract
     local api={}
     local function snapshot(tx,row)
@@ -19,14 +19,23 @@ function DoorsRepository.New(db,allowed)
                 locked=result.locked,startupPolicy=result.startupPolicy,leaves=result.leaves}) then error('invalid_persistence') end
         return result
     end
-    local function transact(caller,callback)
+    local function controlSnapshot(tx,row)
+        local value=snapshot(tx,row)
+        return {doorId=value.doorId,key=value.key,status=value.status,locked=value.locked,
+            revision=value.revision,delegationEpoch=value.delegationEpoch}
+    end
+    local function transact(caller,callback,controlKey)
+        local function permitted()
+            if controlKey~=nil then return controlled~=nil and controlled(caller,controlKey)==true end
+            return allowed(caller)
+        end
         local result
         local ok,committed=pcall(db.transaction,function(tx)
             -- DB may retry a callback after confirmed deadlock rollback.
             result=nil
-            if not allowed(caller) then result=C.Err('unavailable'); return false end
+            if not permitted() then result=C.Err('unavailable'); return false end
             result=callback(tx)
-            if not allowed(caller) then result=C.Err('unavailable'); return false end
+            if not permitted() then result=C.Err('unavailable'); return false end
             return true
         end)
         if not ok then
@@ -65,15 +74,19 @@ function DoorsRepository.New(db,allowed)
                 end
                 row=tx.one('SELECT * FROM `feather_door_groups` WHERE `door_id`=? FOR UPDATE',id)
             else
-                row=tx.one('SELECT * FROM `feather_door_groups` WHERE `door_id`=? AND `manager_resource`=? FOR UPDATE',normalized.doorId,caller)
+                if kind=='control' then
+                    row=tx.one('SELECT * FROM `feather_door_groups` WHERE `door_key`=? FOR UPDATE',normalized.key)
+                else
+                    row=tx.one('SELECT * FROM `feather_door_groups` WHERE `door_id`=? AND `manager_resource`=? FOR UPDATE',normalized.doorId,caller)
+                end
                 if not row then result=C.Err('not_found')
                 elseif tonumber(row.revision)~=normalized.expectedRevision then result=C.Err('revision_conflict')
                 elseif row.status=='retired' then result=C.Err('retired')
-                elseif kind=='state' and row.status~='active' then result=C.Err('suspended')
+                elseif (kind=='state' or kind=='control') and row.status~='active' then result=C.Err('suspended')
                 elseif tonumber(row.revision)>=C.MaxRevision then result=C.Err('revision_exhausted')
                 else
                     local status=kind=='retire' and 'retired' or normalized.status or row.status
-                    local locked=kind=='state' and (normalized.locked and 1 or 0) or tonumber(row.locked)
+                    local locked=(kind=='state' or kind=='control') and (normalized.locked and 1 or 0) or tonumber(row.locked)
                     local epoch=tonumber(row.delegation_epoch)
                     if status~=row.status then epoch=epoch+1 end
                     if epoch>C.MaxRevision then result=C.Err('revision_exhausted') else
@@ -86,12 +99,13 @@ function DoorsRepository.New(db,allowed)
                 end
             end
             if not result and not row then error('group_missing_after_write') end
-            result=result or C.Ok(snapshot(tx,row))
+            result=result or C.Ok(kind=='control' and controlSnapshot(tx,row) or snapshot(tx,row))
+            if kind=='control' then result.controlKey=normalized.key end
             if result.ok then DoorsEvents.Record(tx,caller,kind,normalized,result.value) end
             tx.exec([[UPDATE `feather_door_operations` SET `result_json`=?
                 WHERE `source_resource`=? AND `request_id`=?]],json.encode(result),caller,normalized.requestId)
             return result
-        end)
+        end,kind=='control' and normalized.key or nil)
     end
     function api:Get(caller,request,byKey)
         if not C.Fields(request,byKey and {key=true} or {doorId=true}) then return C.Err('invalid_request') end
@@ -138,6 +152,27 @@ function DoorsRepository.New(db,allowed)
             if not DoorsEvents.Matches(row,payload) then return C.Err('invalid_persistence') end
             return C.Ok({eventId=row.event_id,eventType=row.event_type,payload=payload,status=row.status,attempts=tonumber(row.attempts)})
         end)
+    end
+    function api:ControlGet(caller,request)
+        if not C.Fields(request,{key=true}) or not C.Token(request.key,100) then return C.Err('invalid_request') end
+        return transact(caller,function(tx)
+            local row=tx.one('SELECT * FROM `feather_door_groups` WHERE `door_key`=? FOR UPDATE',request.key)
+            return row and C.Ok(controlSnapshot(tx,row)) or C.Err('not_found')
+        end,request.key)
+    end
+    function api:ControlFind(caller,request)
+        if not C.Fields(request,{key=true,requestId=true}) or not C.Token(request.key,100)
+            or not C.Token(request.requestId,128) then return C.Err('invalid_request') end
+        return transact(caller,function(tx)
+            local row=tx.one([[SELECT `result_json` FROM `feather_door_operations`
+                WHERE `source_resource`=? AND `request_id`=?]],caller,request.requestId)
+            if not row then return C.Err('not_found') end
+            if not row.result_json then return C.Err('pending_recovery') end
+            local value=DoorsEvents.Decode(row.result_json)
+            if not value then return C.Err('invalid_persistence') end
+            if value.controlKey~=request.key then return C.Err('not_found') end
+            return C.Ok({result=value})
+        end,request.key)
     end
     return api
 end
