@@ -47,10 +47,11 @@ function DoorsRepository.New(db,allowed,controlled)
         end
         return result or C.Err(committed and 'invalid_persistence' or 'unavailable')
     end
-    function api:Mutate(caller,kind,request)
+    function api:Mutate(caller,kind,request,authoritySource)
+        if kind=='authority' and caller~='feather-doors' then return C.Err('forbidden') end
         local normalized=C.Validate(kind,request)
         if not normalized then return C.Err('invalid_request') end
-        local canonical=C.Canonical({kind=kind,request=normalized})
+        local canonical=C.Canonical({kind=kind,request=normalized,source=kind=='authority' and authoritySource or nil})
         return transact(caller,function(tx)
             -- Unique receipt key serializes concurrent retries before group locks.
             tx.exec([[INSERT INTO `feather_door_operations` (`source_resource`,`request_id`,`request_json`)
@@ -76,10 +77,15 @@ function DoorsRepository.New(db,allowed,controlled)
             else
                 if kind=='control' then
                     row=tx.one('SELECT * FROM `feather_door_groups` WHERE `door_key`=? FOR UPDATE',normalized.key)
+                elseif kind=='authority' then
+                    row=tx.one('SELECT * FROM `feather_door_groups` WHERE `door_id`=? FOR UPDATE',normalized.doorId)
+                    local binding=tx.one('SELECT * FROM `feather_door_bindings` WHERE `door_id`=?',normalized.doorId)
+                    if not binding or binding.mode~='property' then result=C.Err('target_changed') end
                 else
                     row=tx.one('SELECT * FROM `feather_door_groups` WHERE `door_id`=? AND `manager_resource`=? FOR UPDATE',normalized.doorId,caller)
                 end
-                if not row then result=C.Err('not_found')
+                if result then -- Preserve a terminal authority-mode rejection in its receipt.
+                elseif not row then result=C.Err('not_found')
                 elseif tonumber(row.revision)~=normalized.expectedRevision then result=C.Err('revision_conflict')
                 elseif row.status=='retired' then result=C.Err('retired')
                 elseif (kind=='state' or kind=='control') and row.status~='active' then result=C.Err('suspended')
@@ -88,13 +94,24 @@ function DoorsRepository.New(db,allowed,controlled)
                     local status=kind=='retire' and 'retired' or normalized.status or row.status
                     local locked=(kind=='state' or kind=='control') and (normalized.locked and 1 or 0) or tonumber(row.locked)
                     local epoch=tonumber(row.delegation_epoch)
-                    if status~=row.status then epoch=epoch+1 end
+                    if status~=row.status or kind=='binding' or kind=='authority' then epoch=epoch+1 end
                     if epoch>C.MaxRevision then result=C.Err('revision_exhausted') else
                         tx.exec([[UPDATE `feather_door_groups` SET `label`=?,`status`=?,`locked`=?,`startup_policy`=?,
                             `revision`=`revision`+1,`delegation_epoch`=? WHERE `door_id`=? AND `revision`=?]],
                             normalized.label or row.label,status,locked,normalized.startupPolicy or row.startup_policy,
                             epoch,row.door_id,normalized.expectedRevision)
                         row=tx.one('SELECT * FROM `feather_door_groups` WHERE `door_id`=? FOR UPDATE',row.door_id)
+                        if kind=='binding' or kind=='authority' then
+                            local mode=kind=='authority' and 'property' or normalized.mode
+                            local source=mode=='property' and authoritySource or {}
+                            if mode=='property' and (type(source)~='table' or not C.Uuid(source.linkId) or not C.Uuid(source.propertyId)
+                                or not C.Int(source.epoch,1,9007199254740991)
+                                or not ({active=true,suspended=true,retired=true,unavailable=true})[source.status]) then error('invalid_binding_source') end
+                            tx.exec([[INSERT INTO `feather_door_bindings` (`door_id`,`mode`,`link_id`,`property_id`,`property_epoch`,`property_status`)
+                                VALUES (?,?,?,?,?,?) ON DUPLICATE KEY UPDATE `mode`=VALUES(`mode`),`link_id`=VALUES(`link_id`),
+                                `property_id`=VALUES(`property_id`),`property_epoch`=VALUES(`property_epoch`),`property_status`=VALUES(`property_status`)]],
+                                row.door_id,mode,source.linkId,source.propertyId,source.epoch,source.status)
+                        end
                     end
                 end
             end

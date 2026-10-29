@@ -1,6 +1,6 @@
 -- Target facts only. This slice cannot grant access or authorize a player action.
 DoorsAccess = {}
-function DoorsAccess.New(db,port,ready)
+function DoorsAccess.New(db,port,ready,binding)
     local C=DoorsContract
     local api={registered=false,generation=0,lastCode='not_registered'}
     local function available() return ready() and port.available() end
@@ -11,16 +11,19 @@ function DoorsAccess.New(db,port,ready)
     end
     local function read(id)
         if not available() then return nil,'provider_unavailable' end
-        local called,row=pcall(db.one,[[SELECT `door_id`,`manager_resource`,`status`,`revision`,`delegation_epoch`
-            FROM `feather_door_groups` WHERE `door_id`=?]],id)
+        local called,row,readErr
+        if binding then called,row,readErr=pcall(binding.Read,binding,id)
+        else called,row=pcall(db.one,[[SELECT `door_id`,`manager_resource`,`status`,`revision`,`delegation_epoch`
+            FROM `feather_door_groups` WHERE `door_id`=?]],id) end
         if not called then return nil,'provider_unavailable' end
         if not available() then return nil,'provider_unavailable' end
-        if not row then return nil,'not_found' end
+        if not row then return nil,readErr or 'not_found' end
         if row.door_id~=id or not C.Int(tonumber(row.revision),1,C.MaxRevision)
             or not C.Int(tonumber(row.delegation_epoch),1,C.MaxRevision)
             or (row.status~='active' and row.status~='suspended' and row.status~='retired') then
             return nil,'invalid_persistence'
         end
+        if row.effective_status then row.status=row.effective_status end
         return row
     end
     function api:Drop()

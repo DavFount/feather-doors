@@ -30,6 +30,8 @@ function C.Validate(kind,request)
         or kind=='update' and {'doorId','expectedRevision','label','status','startupPolicy'}
         or kind=='state' and {'doorId','expectedRevision','locked'}
         or kind=='control' and {'key','expectedRevision','locked'}
+        or kind=='binding' and {'doorId','expectedRevision','mode'}
+        or kind=='authority' and {'doorId','expectedRevision'}
         or kind=='retire' and {'doorId','expectedRevision'} or nil
     if not extra then return nil end
     for _,k in ipairs(extra) do fields[k]=true end
@@ -70,6 +72,7 @@ function C.Validate(kind,request)
     if out.startupPolicy~=nil and not policies[out.startupPolicy] then return nil end
     if out.status~=nil and out.status~='active' and out.status~='suspended' then return nil end
     if kind=='update' and out.label==nil and out.status==nil and out.startupPolicy==nil then return nil end
+    if kind=='binding' and out.mode~='standalone' and out.mode~='property' then return nil end
     if (kind=='state' or kind=='control') and type(out.locked)~='boolean' then return nil end
     return out
 end

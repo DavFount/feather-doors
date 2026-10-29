@@ -28,6 +28,7 @@ function db.transaction(callback)
         return id
     end
     function tx.one(sql,a,b)
+        if sql:find('FROM `feather_door_bindings`',1,true) then return copy((data.bindings or {})[a]) end
         if sql:find('feather_door_outbox',1,true) then return copy(data.outbox[receiptKey(a,b)]) end
         if sql:find('feather_door_operations',1,true) then return copy(data.receipts[receiptKey(a,b)]) end
         local row
@@ -77,6 +78,9 @@ function db.transaction(callback)
             if failOutbox then error('outbox insertion failed') end
         elseif sql:find('UPDATE `feather_door_outbox`',1,true) then
             for _,row in pairs(data.outbox) do if row.event_id==p[1] then row.status='pending' end end
+        elseif sql:find('INSERT INTO `feather_door_bindings`',1,true) then
+            data.bindings=data.bindings or {}
+            data.bindings[p[1]]={door_id=p[1],mode=p[2],link_id=p[3],property_id=p[4],property_epoch=p[5],property_status=p[6]}
         else error('unhandled SQL') end
         if unknown then error('unknown DB outcome') end
         if revokeDuringWrite then enabled=false end
@@ -201,6 +205,7 @@ local methods={CreateDoorGroup='create',UpdateDoorGroup='update',DeleteDoorGroup
 local fixtureAllowed=false
 local fixtureCaller='feather-doors-api-tests'
 local targetAdapter
+local fixtureBinding
 exports={['feather-doors']=setmetatable({},{__index=function(_,name)
     return function(_,spec)
         if name=='GetControlledDoor' or name=='SetControlledLockState' or name=='FindControlledOperation' then
@@ -220,6 +225,8 @@ exports={['feather-doors']=setmetatable({},{__index=function(_,name)
         if name=='FindOperation' then return api:Find(caller,spec) end
         if name=='GetOperationEvent' then return api:Event(caller,spec) end
         if name=='GetDoorTargetContext' then return targetAdapter:Context(caller,spec) end
+        if name=='SetDoorBindingMode' then return fixtureBinding:Set(caller,spec) end
+        if name=='GetDoorBindingContext' then return fixtureBinding:Context(caller,spec) end
         error('unknown export')
     end
 end})}
@@ -301,7 +308,16 @@ dofile('server/access.lua')
 data={groups={},leaves={},receipts={},outbox={}}
 fixtureCaller='feather-doors-access-tests'
 local provider,providerGeneration=nil,0
-function db.one(_,targetId) return data.groups[targetId] and copy(data.groups[targetId]) end
+function db.one(sql,targetId)
+    local row=data.groups[targetId] and copy(data.groups[targetId])
+    if row and sql:find('LEFT JOIN `feather_door_bindings`',1,true) then
+        local b=(data.bindings or {})[targetId]
+        row.authority_mode=b and b.mode or 'standalone'
+        row.binding_link_id=b and b.link_id;row.binding_property_id=b and b.property_id
+        row.binding_property_epoch=b and b.property_epoch;row.binding_property_status=b and b.property_status
+    end
+    return row
+end
 targetAdapter=DoorsAccess.New(db,{available=function() return true end,call=function(name,request)
     if name=='AwaitReady' then return C.Ok(true) end
     if name=='GetCapabilities' then return C.Ok({contract=1}) end
@@ -343,4 +359,119 @@ controlPermissions={};fixtureCommands.DoorsServiceTest(0,{'denied'})
 print=actualPrint
 for _,message in ipairs(messages) do check(not message:find('FAIL',1,true),'service controller/owner fixture no assertion failure') end
 check(messages[#messages]:find('1/1 passed',1,true)~=nil,'service fixture ends with denial')
+-- Binding projection through the real mutation/receipt/event pipeline.
+dofile('server/binding.lua')
+data={groups={},leaves={},receipts={},outbox={},bindings={}};enabled=true
+check(api:Mutate('owner','create',create).ok,'binding fixture definition')
+local source={linkId='33333333-3333-3333-3333-333333333333',propertyId='44444444-4444-4444-4444-444444444444',epoch=1,status='active'}
+local propertyAvailable=true
+local binder=DoorsBinding.New(db,api,{available=function() return propertyAvailable end,read=function()
+    return source and C.Ok(copy(source)) or C.Err('link_not_found')
+end},function() return enabled end)
+check(binder:Context('foreign',{doorId=id}).code=='not_found','binding context owner scope')
+check(binder:Set('owner',{doorId=id,expectedRevision=1,mode='property',requestId='bind',reasonCode='test'}).ok,'canonical property mode commit')
+local ctx=binder:Context('owner',{doorId=id})
+check(ctx.ok and ctx.value.delegationEpoch==2 and ctx.value.propertyEpoch==1,'initial cached binding')
+dofile('server/access.lua')
+local targetCallbacks
+local boundAccess=DoorsAccess.New(db,{available=function() return true end,call=function(name,request)
+    if name=='AwaitReady' then return C.Ok(true) end
+    if name=='GetCapabilities' then return C.Ok({contract=1}) end
+    if name=='RegisterTargetProvider' then targetCallbacks=request;return C.Ok(true) end
+    if name=='ResolveTargetContext' then
+        local result=targetCallbacks.resolve(request)
+        if result.ok then result.value.provider={resource='feather-doors',contract=1,generation=1} end
+        return result
+    end
+end},function() return enabled end,binder)
+check(boundAccess:Register().ok and boundAccess:Context('owner',{doorId=id}).value.epoch==2,'Access consumes reconciled binding facts')
+check(binder:Context('owner',{doorId=id}).value.delegationEpoch==2,'stable source no repeated bump')
+source.epoch=2
+check(binder:Context('owner',{doorId=id}).value.delegationEpoch==3,'owner epoch observation invalidates old Doors epoch')
+check(data.outbox['feather-doors/doors.authority:'..id..':2']~=nil,'reconciliation commits durable fact')
+source.status='suspended'
+check(binder:Context('owner',{doorId=id}).value.status=='unavailable','suspended property does not return active context')
+check(boundAccess:Context('owner',{doorId=id}).value.status=='unavailable','Access never converts suspended Property to active door rights')
+source.status='active'
+check(binder:Context('owner',{doorId=id}).value.delegationEpoch==5,'resumption advances epoch')
+local previous=copy(source);source=nil
+check(not binder:Context('owner',{doorId=id}).ok,'missing canonical link never falls back to standalone')
+source=previous;source.linkId='55555555-5555-5555-5555-555555555555'
+check(binder:Context('owner',{doorId=id}).value.delegationEpoch==6,'same-property ABA link generation invalidates')
+propertyAvailable=false
+check(not binder:Context('owner',{doorId=id}).ok,'Property outage fails bound context closed')
+propertyAvailable=true;source.epoch=1
+check(binder:Context('owner',{doorId=id}).code=='property_epoch_rollback','backward source epoch refused')
+source.epoch=2
+local before=data.groups[id].revision
+check(binder:Set('owner',{doorId=id,expectedRevision=before,mode='standalone',requestId='unbind',reasonCode='test'}).ok,'explicit standalone transition')
+propertyAvailable=false
+check(binder:Context('owner',{doorId=id}).value.delegationEpoch==7,'standalone independent of Property availability')
+check(api:Mutate('owner','authority',{doorId=id,expectedRevision=data.groups[id].revision,requestId='forged',reasonCode='test'},source).code=='forbidden',
+    'internal reconciliation is not manager-selected mutation authority')
+-- Actual integration fixture protocol with mocked Property mutation transport.
+data={groups={},leaves={},receipts={},outbox={},bindings={}};fixtureAllowed=true
+fixtureCaller='feather-doors-property-tests'
+local properties,nextProperty,nextLink={},0,0
+local foundationFile=assert(io.open('../feather-property/server/foundation.lua','r'))
+local foundationSource=foundationFile:read('*a');foundationFile:close()
+local keyFunction=assert(foundationSource:match('(function Property%.PropertyKey%(value%).-\nend)'))
+local keyOwner={Property={},type=type}
+assert(load(keyFunction,'Property.PropertyKey','t',keyOwner))()
+check(not keyOwner.Property.PropertyKey('doors.binding.a'),'Property rejects unnamespaced fixture key')
+check(keyOwner.Property.PropertyKey('feather-doors-property-tests:binding.a'),'Property accepts namespaced fixture key')
+local function propById(propertyId) for _,p in pairs(properties) do if p.propertyId==propertyId then return p end end end
+local function propertyCall(_,name,r)
+    if name=='RegisterProperty' then
+        assert(keyOwner.Property.PropertyKey(r.propertyKey),'Property key validation');assert(not properties[r.propertyKey]);nextProperty=nextProperty+1
+        local p={propertyId=('66666666-6666-6666-6666-%012d'):format(nextProperty),propertyKey=r.propertyKey,
+            revision=1,delegationEpoch=1,status='active',owners={},links={}}
+        properties[r.propertyKey]=p;return C.Ok(copy(p))
+    end
+    if name=='FindPropertyByKey' then return C.Ok(copy(properties[r.propertyKey])) end
+    local p=assert(propById(r.propertyId));assert(p.revision==r.expectedRevision,'Property expected revision')
+    if name=='AddPropertyLink' then
+        for _,other in pairs(properties) do for _,link in ipairs(other.links) do assert(link.externalId~=r.externalId,'link already in use') end end
+        nextLink=nextLink+1;p.links[#p.links+1]={linkId=('77777777-7777-7777-7777-%012d'):format(nextLink),linkType=r.linkType,externalId=r.externalId}
+    elseif name=='RemovePropertyLink' then
+        local found=false;for i,link in ipairs(p.links) do if link.linkId==r.linkId then table.remove(p.links,i);found=true;break end end;assert(found)
+    elseif name=='ChangePropertyStatus' then p.status=r.status;if r.status=='retired' then p.delegationEpoch=p.delegationEpoch+1;p.links={} end
+    elseif name=='UpdatePropertyMetadata' then p.label=r.label
+    elseif name=='GrantInterest' then
+        nextLink=nextLink+1;p.owners={{interestId=('88888888-8888-8888-8888-%012d'):format(nextLink),holderType='character',holderId=r.holderId}}
+        p.delegationEpoch=p.delegationEpoch+1
+    elseif name=='EndInterest' then assert(p.owners[1].interestId==r.interestId);p.owners={};p.delegationEpoch=p.delegationEpoch+1
+    else error('unknown Property operation '..name) end
+    p.revision=p.revision+1;return C.Ok(copy(p))
+end
+exports['feather-property']=setmetatable({},{__index=function(_,name) return function(_,r) return propertyCall(nil,name,r) end end})
+fixtureBinding=DoorsBinding.New(db,api,{available=function() return true end,read=function(targetId)
+    for _,p in pairs(properties) do for _,link in ipairs(p.links) do if link.externalId==targetId then
+        return C.Ok({linkId=link.linkId,propertyId=p.propertyId,epoch=p.delegationEpoch,status=p.status})
+    end end end
+    return C.Err('link_not_found')
+end},function() return enabled end)
+local bindingProvider
+targetAdapter=DoorsAccess.New(db,{available=function() return true end,call=function(name,r)
+    if name=='AwaitReady' then return C.Ok(true) end
+    if name=='GetCapabilities' then return C.Ok({contract=1}) end
+    if name=='RegisterTargetProvider' then bindingProvider=r;return C.Ok(true) end
+    if name=='ResolveTargetContext' then local result=bindingProvider.resolve(r)
+        if result.ok then result.value.provider={resource='feather-doors',contract=1,generation=1} end;return result
+    end
+end},function() return enabled end,fixtureBinding)
+targetAdapter:Register()
+exports['feather-core'].GetSessionContext=function() return C.Ok({characterId='99999999-9999-9999-9999-999999999999'}) end
+messages={};print=function(message) messages[#messages+1]=message end
+dofile('../feather-doors-property-tests/server.lua')
+fixtureCommands.DoorsPropertyTest(0,{'run'})
+fixtureCommands.DoorsPropertyTest(0,{'verify'})
+fixtureCommands.DoorsPropertyTest(0,{'owner','1'})
+fixtureCommands.DoorsPropertyTest(0,{'cleanup'})
+fixtureAllowed=false;fixtureCommands.DoorsPropertyTest(0,{'denied'})
+print=actualPrint
+for _,message in ipairs(messages) do check(not message:find('FAIL',1,true),'actual Property binding fixture no assertion failure') end
+check(messages[#messages]:find('passed %(denied%)')~=nil,'binding fixture completes final denial')
+local totalFacts=0;for _ in pairs(data.outbox) do totalFacts=totalFacts+1 end
+check(totalFacts==10 and data.groups[id].status=='retired','exact durable mutation/reconciliation fact count and cleanup')
 print(('PASS %d repository/contract checks'):format(passed))

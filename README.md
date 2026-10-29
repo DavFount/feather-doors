@@ -64,7 +64,7 @@ No player routes or operational AwaitReady are provided. Consumer server APIs
 must check foundationReady plus the relevant feature, not operational ready.
 
 Server-console command `DoorsSchemaSmokeTest` is read-only: it verifies migration
-checksums/completion, five InnoDB tables and 39 expected column names/types.
+checksums/completion, six InnoDB tables and 45 expected column names/types.
 It does not test SQL constraints, transactional CRUD, receipt recovery or native
 behavior. Run it again after restarting Doors; first install should log
 applied=1/resumed=0 and an ordinary second startup applied=0/resumed=0.
@@ -95,6 +95,8 @@ All calls return `{ok=true,value=...}` or `{ok=false,code,message}`.
 | GetControlledDoor | key (exact configured service-controller scope) |
 | SetControlledLockState | key, expectedRevision, locked:boolean, requestId, reasonCode |
 | FindControlledOperation | key, requestId (exact service scope and caller receipt) |
+| SetDoorBindingMode | doorId, expectedRevision, mode (standalone/property), requestId, reasonCode; definition manager only |
+| GetDoorBindingContext | doorId; definition manager only, freshly reconciled source context |
 
 Leaves contain `hash`, `model` (uint32 integers), `x`, `y`, `z` (bounded finite
 numbers). They are copied on validation. Keys/leaf identity/geometry/manager are
@@ -241,6 +243,40 @@ Console-only DoorsControllerFixture enable|disable temporarily permits separate
 owner/controller test resources for one synthetic key, resetting on restart or
 either fixture stop. See framework SERVICE_CONTROL_ACCEPTANCE.md. No real bank
 resource is enabled by this fixture or the default config.
+
+## Property-bound authority
+
+Migration004 adds a six-field authority-observation table; schema smoke expects
+schema4/six tables/45 columns. Accepted earlier migration SQL is unchanged. Existing
+groups default to standalone. Explicit mode changes advance Door epoch/revision;
+property mode requires a canonical Property door link and active source, never a
+caller-supplied Property or owner claim. Property remains sole link/ownership
+authority; Doors stores observed reference/epoch/status only. Service controllers
+cannot change binding mode. Grant management is still disabled.
+
+GetDoorBindingContext returns doorId/mode/revision/delegationEpoch/effective
+status plus observed linkId/propertyId/propertyEpoch when bound. Reads can reconcile
+changed canonical context transactionally and emit an authority event; stable
+reads do not bump epochs. Property metadata revisions do not invalidate, but
+ownership epoch, link incarnation, Property identity and effective status changes
+do. Missing links/outages fail closed, never silently become standalone. Raw Door
+status and SQL desired lock state are distinct from effective Access target status.
+
+Reconciliation and explicit binding emit definition notifications with additional
+contract1 operation values authority/binding. All mutations use existing receipts/
+revision/outbox protections. Canonical Property facts are fetched outside Door SQL
+locks and rechecked after yields. Failed post-commit confirmation returns
+pending_recovery; look up the original operation receipt, do not blindly issue
+another request ID. These checks are not an atomic cross-resource ownership/use
+fence; no live grant/player operation is enabled by them.
+
+Property is optional for standalone/global doors. Config must trust Doors as a
+Property reader; new GetPropertyLinkContext exposes link identity and effective
+owner epoch without a second ownership store. Property stop invalidates in-flight
+binding reads. No Item/Economy/Weapons hooks are introduced. Framework
+PROPERTY_BINDING_ACCEPTANCE.md owns the staged headless/owner/cleanup proof.
+Console DoorsPropertyFixture enable|disable permits the isolated fixture only
+until restart/fixture stop; it has its own explicitly scoped Property test trust.
 
 ## Resource ownership
 

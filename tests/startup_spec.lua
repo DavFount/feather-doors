@@ -8,6 +8,7 @@ local function boot(options)
     DoorsContract={Err=function(code) return {ok=false,code=code} end}
     DoorsRepository={New=function() return {} end}
     DoorsAccess={New=function() return {registered=false,lastCode='not_registered',Drop=function() end} end}
+    DoorsBinding={New=function() return {Drop=function() end} end}
     DoorsEvents={Names={definition='doors.definition.changed.v1',state='doors.state.changed.v1'},
         Validate=function() return true end,New=function() return {enabled=false,busy=false,lastCode='idle'} end}
     exports=setmetatable({['feather-core']={

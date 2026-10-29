@@ -20,6 +20,7 @@ server_scripts {
     'server/events.lua',
     'server/access.lua',
     'server/repository.lua',
+    'server/binding.lua',
     'server/main.lua'
 }
 

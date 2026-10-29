@@ -1,7 +1,7 @@
 DoorsEvents = {}
 local E=DoorsEvents
 E.Names={definition='doors.definition.changed.v1',state='doors.state.changed.v1'}
-local kinds={create=true,update=true,state=true,control=true,retire=true}
+local kinds={create=true,update=true,state=true,control=true,binding=true,authority=true,retire=true}
 function E.Decode(text)
     if type(text)~='string' or #text>2048 then return nil end
     -- Runtime rapidjson can retain JSON metadata despite dkjson-compatible
