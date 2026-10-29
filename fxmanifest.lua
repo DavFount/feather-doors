@@ -21,6 +21,7 @@ server_scripts {
     'server/access.lua',
     'server/repository.lua',
     'server/binding.lua',
+    'server/authority.lua',
     'server/main.lua'
 }
 

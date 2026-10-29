@@ -227,6 +227,8 @@ exports={['feather-doors']=setmetatable({},{__index=function(_,name)
         if name=='GetDoorTargetContext' then return targetAdapter:Context(caller,spec) end
         if name=='SetDoorBindingMode' then return fixtureBinding:Set(caller,spec) end
         if name=='GetDoorBindingContext' then return fixtureBinding:Context(caller,spec) end
+        if name=='CheckDoorGrantAuthority' then return fixtureAuthority:Check(caller,spec) end
+        if name=='GetCapabilities' then return {grantManagement=false} end
         error('unknown export')
     end
 end})}
@@ -429,7 +431,12 @@ local function propertyCall(_,name,r)
         properties[r.propertyKey]=p;return C.Ok(copy(p))
     end
     if name=='FindPropertyByKey' then return C.Ok(copy(properties[r.propertyKey])) end
-    local p=assert(propById(r.propertyId));assert(p.revision==r.expectedRevision,'Property expected revision')
+    local p=assert(propById(r.propertyId))
+    if name=='CheckInterest' then
+        local matched=false;for _,owner in ipairs(p.owners) do if owner.holderId==r.holderId then matched=true end end
+        return C.Ok({propertyId=p.propertyId,matched=matched,propertyStatus=p.status})
+    end
+    assert(p.revision==r.expectedRevision,'Property expected revision')
     if name=='AddPropertyLink' then
         for _,other in pairs(properties) do for _,link in ipairs(other.links) do assert(link.externalId~=r.externalId,'link already in use') end end
         nextLink=nextLink+1;p.links[#p.links+1]={linkId=('77777777-7777-7777-7777-%012d'):format(nextLink),linkType=r.linkType,externalId=r.externalId}
@@ -474,4 +481,21 @@ for _,message in ipairs(messages) do check(not message:find('FAIL',1,true),'actu
 check(messages[#messages]:find('passed %(denied%)')~=nil,'binding fixture completes final denial')
 local totalFacts=0;for _ in pairs(data.outbox) do totalFacts=totalFacts+1 end
 check(totalFacts==10 and data.groups[id].status=='retired','exact durable mutation/reconciliation fact count and cleanup')
+data={groups={},leaves={},receipts={},outbox={},bindings={}}
+dofile('server/authority.lua')
+local actor={accountId='12121212-1212-1212-1212-121212121212',characterId='99999999-9999-9999-9999-999999999999',
+ sessionId='13131313-1313-1313-1313-131313131313',generation=1}
+exports['feather-core'].GetSessionContext=function() return C.Ok(copy(actor)) end
+exports['feather-core'].Authorize=function() return C.Ok({allowed=false}) end
+fixtureAuthority=DoorsAuthority.New(fixtureBinding,{session=function() return C.Ok(copy(actor)) end,
+ interest=function(r) return propertyCall(nil,'CheckInterest',r) end,
+ policy=function() return C.Ok({allowed=false}) end},function() return enabled end)
+messages={};print=function(message) messages[#messages+1]=message end
+fixtureAllowed=false;fixtureCommands.DoorsAuthorityTest(0,{'denied'})
+fixtureAllowed=true;fixtureCommands.DoorsAuthorityTest(0,{'run','1'})
+print=actualPrint
+for _,message in ipairs(messages) do check(not message:find('preserve fixture',1,true),'authority live fixture no error: '..message) end
+check(messages[#messages]=='[doors-authority-tests] done 15/15 passed (run)','authority live fixture completes full protocol')
+local facts=0;for _ in pairs(data.outbox) do facts=facts+1 end
+check(facts==8,'authority fixture adds exactly eight durable Door facts')
 print(('PASS %d repository/contract checks'):format(passed))

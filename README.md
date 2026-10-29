@@ -295,3 +295,28 @@ acceptance gates. Follow the current checkpoint rather than historical tests.
 ## License
 
 GNU GPL v3; see LICENSE.
+
+## Grant-management authority preflight
+
+`CheckDoorGrantAuthority({doorId,actorSource,path,operation,capability?})` is a
+server-only advisory API for exact trusted definition managers and their own Door
+groups. `path` is explicitly `property` or `staff`; `operation` is `grant`,
+`revoke` or `list`. Supply `door.lock` or `door.unlock` for grant/revoke; omit
+capability for list. Source0, identity/owner/staff payload claims and other fields
+are rejected. All paths require a current selected-character Core session and
+an active Door/effective Property context. Inactive cleanup is not authorized.
+
+Property authority requires a canonical property binding and current individual
+character owner interest; tenancy and organization membership confer no rights.
+Staff authority requires Core's explicit `doors.grant.manage` decision. The
+current Admin catalog does not define that action, so installed policy denies
+staff preflight. No role fallback or service-policy exception is added here.
+Positive staff policy behavior is covered offline, not accepted live yet.
+
+The check compares session identity/generation, local lifecycle fences and Door/
+Property/link facts across yields. Success returns `allowed`, `path`, `doorId`,
+`epoch` and `advisory=true`. It issues no token or grant and must never be cached
+as authorization for later issuance/use. Access's target management callback
+still denies all; grantManagement/playerAuthorization remain false. Cross-domain
+transfer/use is not atomic. Actor-bound issuance wrappers and an explicit staff
+catalog migration require separate implementation/acceptance.

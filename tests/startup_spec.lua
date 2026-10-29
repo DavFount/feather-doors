@@ -8,6 +8,7 @@ local function boot(options)
     DoorsContract={Err=function(code) return {ok=false,code=code} end}
     DoorsRepository={New=function() return {} end}
     DoorsAccess={New=function() return {registered=false,lastCode='not_registered',Drop=function() end} end}
+    DoorsAuthority={New=function() return {Drop=function() end,Bump=function() end} end}
     DoorsBinding={New=function() return {Drop=function() end} end}
     DoorsEvents={Names={definition='doors.definition.changed.v1',state='doors.state.changed.v1'},
         Validate=function() return true end,New=function() return {enabled=false,busy=false,lastCode='idle'} end}
@@ -42,6 +43,7 @@ end
 local state=boot()
 check(state.exports.CreateDoorGroup({}).code=='forbidden','default caller policy denies API')
 check(state.exports.FindOperation({requestId='other'}).code=='forbidden','default caller policy denies receipts')
+check(state.exports.CheckDoorGrantAuthority({}).code=='forbidden','authority preflight requires caller trust')
 check(state.exports.GetHealth().foundationReady,'schema foundation ready')
 check(state.exports.GetHealth().ready==false,'schema readiness never enables domain')
 check(state.exports.GetCapabilities().schema==1 and not state.exports.GetCapabilities().doorRegistration,'only schema capability enabled')

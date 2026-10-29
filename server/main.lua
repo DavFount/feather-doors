@@ -6,6 +6,7 @@ local accessFixtureEnabled=false
 local controllerFixtureEnabled=false
 local propertyFixtureEnabled=false
 local binding
+local authority
 local access
 local publisher
 local function dependencies()
@@ -57,6 +58,15 @@ end,function() return health().foundationReady end)
 binding=DoorsBinding.New(DB,repository,{available=function() return GetResourceState('feather-property')=='started' end,
     read=function(id) return exports['feather-property']:GetPropertyLinkContext({linkType='door',externalId=id}) end},
     function() return health().foundationReady end)
+authority=DoorsAuthority.New(binding,{
+    session=function(source) return exports['feather-core']:GetSessionContext(source) end,
+    interest=function(request) return exports['feather-property']:CheckInterest(request) end,
+    policy=function(action,request) return exports['feather-core']:Authorize(action,request) end
+},function() return health().foundationReady end)
+for _,name in ipairs({'core.session.ready.v1','core.session.leaving.v1','core.session.left.v1'}) do
+    AddEventHandler(name,function(session) if type(session)=='table' then authority:Bump(session.source) end end)
+end
+AddEventHandler('playerDropped',function() authority:Bump(tonumber(source)) end)
 access=DoorsAccess.New(DB,{available=function() return GetResourceState('feather-access')=='started' end,
     call=function(name,request) return exports['feather-access'][name](nil,request) end},
     function() return health().foundationReady end,binding)
@@ -70,6 +80,10 @@ local function register(name,method,kind)
         if method=='AccessContext' then return access:Context(caller,request) end
         if method=='BindingSet' then return binding:Set(caller,request) end
         if method=='BindingContext' then return binding:Context(caller,request) end
+        if method=='GrantAuthority' then
+            local ok,result=pcall(authority.Check,authority,caller,request)
+            return ok and result or DoorsContract.Err('authority_unavailable')
+        end
         return repository[method](repository,caller,request)
     end)
 end
@@ -85,6 +99,7 @@ register('GetOperationEvent','Event')
 register('GetDoorTargetContext','AccessContext')
 register('SetDoorBindingMode','BindingSet')
 register('GetDoorBindingContext','BindingContext')
+register('CheckDoorGrantAuthority','GrantAuthority')
 RegisterCommand('DoorsPropertyFixture',function(player,args)
     if player~=0 then return end
     if #args~=1 or args[1]~='enable' and args[1]~='disable' then
@@ -222,13 +237,15 @@ AddEventHandler('onResourceStop',function(resource)
     if resource=='feather-doors-access-tests' then accessFixtureEnabled=false end
     if resource=='feather-doors-service-tests' or resource=='feather-doors-service-owner-tests' then controllerFixtureEnabled=false end
     if resource=='feather-doors-property-tests' then propertyFixtureEnabled=false end
-    if resource=='feather-property' then binding:Drop() end
+    if resource=='feather-property' then binding:Drop(); authority:Drop() end
+    if resource=='feather-admin' then authority:Drop() end
     if resource=='feather-access' then access:Drop() end
     if resource=='feather-core' or resource=='feather-mysql' or resource==GetCurrentResourceName() then
         stopped=true; foundation.ready=false; foundation.status='dependency_stopped'
         publisher.enabled=false
         access:Drop()
         binding:Drop()
+        authority:Drop()
     end
 end)
 RegisterCommand('DoorsSchemaSmokeTest',function(player,args)
